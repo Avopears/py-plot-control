@@ -19,9 +19,9 @@ plt.rcParams.update(
         "legend.fontsize": 5,
         "legend.frameon": False,
         "svg.fonttype": "none",
+        "pdf.fonttype":42
     }
 )
-
 
 def cm_to_inch(value_cm: float) -> float:
     return value_cm / CM_PER_INCH
