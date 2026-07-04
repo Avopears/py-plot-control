@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import argparse
+import tempfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -641,31 +642,73 @@ def _run_inkscape_export(
     subprocess.run(cmd, check=True)
 
 
+def _clean_svg_for_export(
+    input_svg,
+    clean_svg_folder=None,
+    min_background_area_ratio=0.90,
+):
+    """
+    生成供 Inkscape 导出的清理版 SVG。
+
+    clean_svg_folder 为 True 或目录路径时会保留清理后的 SVG；
+    为 None/False 时只使用临时文件，导出完成后由调用方删除。
+    """
+    input_svg = Path(input_svg)
+
+    if clean_svg_folder is True:
+        clean_svg_dir = Path("./SVG_clean")
+    elif clean_svg_folder:
+        clean_svg_dir = Path(clean_svg_folder)
+    else:
+        clean_svg_dir = None
+
+    if clean_svg_dir is not None:
+        clean_svg_dir.mkdir(parents=True, exist_ok=True)
+        clean_svg = clean_svg_dir / f"{input_svg.stem}_clean.svg"
+        should_delete_clean_svg = False
+    else:
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix=f"{input_svg.stem}_clean_",
+            suffix=".svg",
+            delete=False,
+        )
+        temp_file.close()
+        clean_svg = Path(temp_file.name)
+        should_delete_clean_svg = True
+
+    clean_svg, removed_count = remove_svg_background_rectangles(
+        input_svg,
+        clean_svg,
+        min_area_ratio=min_background_area_ratio,
+    )
+    return clean_svg, removed_count, should_delete_clean_svg
+
+
 def svg_to_pdf(
     svg_folder="./",
     output_folder="./",
     crop_white_edges=True,
     clean_svg_folder=None,
     min_background_area_ratio=0.90,
+    svg_file=None,
 ):
     """
     将指定 SVG 文件或文件夹中的所有 SVG 文件转换为 PDF。
 
     参数:
         svg_folder (str):             SVG 文件或 SVG 文件夹路径，默认为当前目录。
+        svg_file (str):               单个 SVG 文件路径；传入后优先于 svg_folder。
         output_folder (str):          PDF 输出文件夹路径，默认为当前目录。
         crop_white_edges (bool):      是否使用 Inkscape 裁剪页面白边。
-        clean_svg_folder (str):       清理背景后的 SVG 输出文件夹。
+        clean_svg_folder:             True 时保存到 ./SVG_clean；字符串时保存到指定文件夹；
+                                      None/False 时不保留清理后的 SVG。
         min_background_area_ratio:    透明占位框至少占 SVG 画布的比例。
     """
     if not _check_inkscape():
         return
 
     os.makedirs(output_folder, exist_ok=True)
-    if clean_svg_folder:
-        os.makedirs(clean_svg_folder, exist_ok=True)
-
-    svg_paths = _get_svg_paths(svg_folder)
+    svg_paths = _get_svg_paths(svg_file if svg_file is not None else svg_folder)
 
     if not svg_paths:
         print("未找到任何 SVG 文件。")
@@ -676,28 +719,27 @@ def svg_to_pdf(
     print("-" * 50)
 
     for input_svg in svg_paths:
-        clean_svg = (
-            Path(clean_svg_folder) / f"{input_svg.stem}_clean.svg"
-            if clean_svg_folder
-            else input_svg.with_name(input_svg.stem + "_clean.svg")
-        )
         output_pdf = Path(output_folder) / f"{input_svg.stem}.pdf"
 
-        clean_svg, removed_count = remove_svg_background_rectangles(
+        clean_svg, removed_count, should_delete_clean_svg = _clean_svg_for_export(
             input_svg,
-            clean_svg,
-            min_area_ratio=min_background_area_ratio,
+            clean_svg_folder=clean_svg_folder,
+            min_background_area_ratio=min_background_area_ratio,
         )
         print(
             f"正在处理: {input_svg.name} -> {output_pdf.name} "
             f"(已删除背景占位框 {removed_count} 个)"
         )
-        _run_inkscape_export(
-            input_svg=clean_svg,
-            output_file=str(output_pdf),
-            export_type="pdf",
-            crop_white_edges=crop_white_edges,
-        )
+        try:
+            _run_inkscape_export(
+                input_svg=clean_svg,
+                output_file=str(output_pdf),
+                export_type="pdf",
+                crop_white_edges=crop_white_edges,
+            )
+        finally:
+            if should_delete_clean_svg:
+                Path(clean_svg).unlink(missing_ok=True)
 
     print("-" * 50)
     print("全部 PDF 转换完成！")
@@ -708,7 +750,7 @@ def svg_to_png(
     output_folder="./PNG",
     dpi=600,
     crop_white_edges=True,
-    clean_svg_folder="./SVG_clean",
+    clean_svg_folder=None,
     min_background_area_ratio=0.90,
 ):
     """
@@ -719,16 +761,14 @@ def svg_to_png(
         output_folder (str):          PNG 输出文件夹路径，默认为 ./PNG。
         dpi (int):                    输出 PNG 的分辨率（150=网页, 300=打印, 600=高清）。
         crop_white_edges (bool):      是否使用 Inkscape 裁剪页面白边。
-        clean_svg_folder (str):       清理背景后的 SVG 输出文件夹。
+        clean_svg_folder:             True 时保存到 ./SVG_clean；字符串时保存到指定文件夹；
+                                      None/False 时不保留清理后的 SVG。
         min_background_area_ratio:    透明占位框至少占 SVG 画布的比例。
     """
     if not _check_inkscape():
         return
 
     os.makedirs(output_folder, exist_ok=True)
-    if clean_svg_folder:
-        os.makedirs(clean_svg_folder, exist_ok=True)
-
     svg_paths = _get_svg_paths(svg_folder)
 
     if not svg_paths:
@@ -740,29 +780,28 @@ def svg_to_png(
     print("-" * 50)
 
     for input_svg in svg_paths:
-        clean_svg = (
-            Path(clean_svg_folder) / f"{input_svg.stem}_clean.svg"
-            if clean_svg_folder
-            else input_svg.with_name(input_svg.stem + "_clean.svg")
-        )
         output_png = Path(output_folder) / f"{input_svg.stem}.png"
 
-        clean_svg, removed_count = remove_svg_background_rectangles(
+        clean_svg, removed_count, should_delete_clean_svg = _clean_svg_for_export(
             input_svg,
-            clean_svg,
-            min_area_ratio=min_background_area_ratio,
+            clean_svg_folder=clean_svg_folder,
+            min_background_area_ratio=min_background_area_ratio,
         )
         print(
             f"正在处理: {input_svg.name} -> {output_png.name} "
             f"(已删除背景占位框 {removed_count} 个)"
         )
-        _run_inkscape_export(
-            input_svg=clean_svg,
-            output_file=str(output_png),
-            export_type="png",
-            dpi=dpi,
-            crop_white_edges=crop_white_edges,
-        )
+        try:
+            _run_inkscape_export(
+                input_svg=clean_svg,
+                output_file=str(output_png),
+                export_type="png",
+                dpi=dpi,
+                crop_white_edges=crop_white_edges,
+            )
+        finally:
+            if should_delete_clean_svg:
+                Path(clean_svg).unlink(missing_ok=True)
 
     print("-" * 50)
     print("全部 PNG 转换完成！")
@@ -801,14 +840,26 @@ def _build_arg_parser():
     pdf_parser = subparsers.add_parser("pdf", help="导出为 PDF")
     pdf_parser.add_argument("svg_input", help="SVG 文件或文件夹")
     pdf_parser.add_argument("-o", "--output-folder", default="./PDF")
-    pdf_parser.add_argument("--clean-svg-folder", default="./SVG_clean")
+    pdf_parser.add_argument(
+        "--clean-svg-folder",
+        nargs="?",
+        const="./SVG_clean",
+        default=None,
+        help="保留清理后的 SVG；可不填路径，默认保存到 ./SVG_clean",
+    )
     pdf_parser.add_argument("--no-crop", action="store_true")
     pdf_parser.add_argument("--min-background-area-ratio", type=float, default=0.90)
 
     png_parser = subparsers.add_parser("png", help="导出为 PNG")
     png_parser.add_argument("svg_input", help="SVG 文件或文件夹")
     png_parser.add_argument("-o", "--output-folder", default="./PNG")
-    png_parser.add_argument("--clean-svg-folder", default="./SVG_clean")
+    png_parser.add_argument(
+        "--clean-svg-folder",
+        nargs="?",
+        const="./SVG_clean",
+        default=None,
+        help="保留清理后的 SVG；可不填路径，默认保存到 ./SVG_clean",
+    )
     png_parser.add_argument("--dpi", type=int, default=600)
     png_parser.add_argument("--no-crop", action="store_true")
     png_parser.add_argument("--min-background-area-ratio", type=float, default=0.90)
@@ -829,12 +880,11 @@ def main(argv=None):
         # 保留原来的直接运行行为。
         svg_folder = "./成品图"
         output_folder = "./PDF"
-        clean_svg_folder = "./SVG_clean"
         svg_to_pdf(
             svg_folder,
             output_folder,
             crop_white_edges=True,
-            clean_svg_folder=clean_svg_folder,
+            clean_svg_folder=None,
         )
         return
 
@@ -869,21 +919,10 @@ def main(argv=None):
 #   主程序入口 —— 在这里选择转换模式并设置参数
 # ============================================================
 if __name__ == "__main__":
-    # 单个文件
-    # 或者整个文件夹
-    # svg_input = "./成品图"
-
-    # ========================================================
-    # 2. 选择运行模式
-    # ========================================================
-    # 可选:
-    #   "pdf"   : SVG -> PDF
-    #   "png"   : SVG -> PNG
-    #   "clean" : 只清理 SVG，不导出 PDF/PNG
-    svg_to_pdf(
-        svg_folder="./成品图",
-        output_folder="./PDF",
-        crop_white_edges=True,
-        clean_svg_folder="./SVG_clean",
-        min_background_area_ratio=0.75,
-    )
+    # 用法示例：
+    # svg_to_pdf(svg_file="./图片1/example.svg", output_folder="./PDF")
+    # svg_to_pdf(svg_folder="./图片1", output_folder="./PDF", clean_svg_folder=True)
+    # svg_to_pdf(svg_file="./图片1/example.svg", output_folder="./PDF", clean_svg_folder="./SVG_clean")
+    # svg_to_png(svg_folder="./图片1", output_folder="./PNG", dpi=600)
+    # clean_svg(svg_input="./图片1/example.svg", output_folder="./SVG_clean")
+    svg_to_pdf(svg_file="./图片1.svg", output_folder="./PDF")
